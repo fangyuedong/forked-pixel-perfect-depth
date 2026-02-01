@@ -1,0 +1,12 @@
+I would like to combine PixelPerfectDepth and MoGe-2 to implement an absolute depth estimation pipeline, loosely inspired by the workflow in run_point_cloud.py. The desired functionality is as follows:
+Use MoGe-2 to generate an initial absolute depth map.
+MoGe-2 provides metric-scale depth with good global structure but may still contain minor artifacts or inaccuracies near object boundaries.
+Use PixelPerfectDepth to refine only the edge regions of the MoGe-2 depth map, specifically targeting “flying pixels” (depth discontinuities or outliers at object boundaries), while preserving the main body of the MoGe-2 depth unchanged.
+This refinement should function similarly to an image inpainting or completion task:
+Identify edge/boundary regions (e.g., via depth gradient or semantic edge detection) as the “mask” or “missing/inaccurate region”.
+Treat these masked edge areas as the target for PixelPerfectDepth to regenerate high-fidelity, geometrically consistent depth values.
+Keep non-edge (interior) regions from the original MoGe-2 output intact.
+You can use the codebase in /Users/fangyuedong/Code/RePaint for reference.
+The goal is to leverage MoGe-2’s strength in absolute/metric depth estimation and PixelPerfectDepth’s strength in pixel-perfect, flying-pixel-free boundary reconstruction, resulting in a final depth map that is both metrically accurate and geometrically clean at edges .
+
+Please help implement this hybrid pipeline.
