@@ -14,6 +14,7 @@ from ppd.utils.transform import image2tensor, resize_1024, resize_1024_crop, res
 
 from ppd.models.depth_anything_v2.dpt import DepthAnythingV2
 from ppd.models.dit import DiT
+from ppd.utils.utils import has_native_bf16
 
 class PixelPerfectDepth(nn.Module):
     def __init__(
@@ -62,7 +63,7 @@ class PixelPerfectDepth(nn.Module):
         resize_image = resize_keep_aspect(image)
         image = image2tensor(resize_image)
         image = image.to(self.device)
-        autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        autocast_dtype = torch.bfloat16 if has_native_bf16() else torch.float16
         with torch.autocast(device_type=self.device.type, dtype=autocast_dtype):
             depth = self.forward_test(image)
         return depth, resize_image

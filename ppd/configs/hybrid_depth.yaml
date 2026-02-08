@@ -1,0 +1,48 @@
+# Hybrid Depth Estimation Pipeline Configuration
+#
+# This configuration is for the hybrid depth estimation pipeline that combines:
+# - Stage 1: MoGe-2 for metric absolute depth
+# - Stage 2: Pixel-Perfect Depth with RePaint-style edge-aware refinement
+#
+# Usage:
+#   python run_hybrid_depth.py --img_path assets/examples/images
+
+# Model configuration
+model:
+  # Semantic model backend: 'DA2' (Depth Anything V2) or 'MoGe2'
+  semantics_model: 'DA2'
+
+  # Checkpoint paths (automatically selected based on semantics_model)
+  semantics_pth: 'checkpoints/depth_anything_v2_vitl.pth'  # For DA2
+  dit_pth: 'checkpoints/ppd.pth'  # For DA2
+  # When semantics_model='MoGe2':
+  #   semantics_pth: 'checkpoints/moge2.pt'
+  #   dit_pth: 'checkpoints/ppd_moge.pth'
+
+  # Diffusion sampling parameters
+  sampling_steps: 10  # Number of reverse diffusion steps
+  resampling_steps: 1  # RePaint resampling parameter U (1=no resampling, >1=with resampling)
+
+# Edge detection configuration
+edge_detection:
+  threshold: 0.1  # Gradient magnitude threshold (0-1 range)
+  dilation_kernel_size: 3  # Size of dilation kernel in pixels (odd numbers recommended)
+
+# Output configuration
+output:
+  outdir: 'hybrid_depth_output'  # Default output directory
+  save_npy: true  # Save raw depth as .npy files
+  save_pcd: true  # Save point clouds as .ply files
+  save_vis: true  # Save visualization as .png files
+  save_edge_mask: false  # Save edge masks for debugging
+
+# Notes:
+# - Resampling steps (U):
+#   - U=1: Standard diffusion (no resampling, default)
+#   - U>1: Forward-backward resampling for improved coherence (not yet implemented)
+# - Edge threshold:
+#   - Lower values (e.g., 0.05): More edges detected, more refinement
+#   - Higher values (e.g., 0.15): Fewer edges detected, less refinement
+# - Dilation kernel:
+#   - Larger values (e.g., 5): Wider edge regions, more aggressive refinement
+#   - Smaller values (e.g., 1): Narrower edge regions, more conservative refinement

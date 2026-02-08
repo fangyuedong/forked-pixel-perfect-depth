@@ -69,7 +69,10 @@ class PixelPerfectVideoDepth(nn.Module):
             pad_len = STRIDE - R
             last_img = p_imgs[-1]
             p_imgs.extend([last_img.clone() for _ in range(pad_len)])
-        autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        try:
+            autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        except:
+            autocast_dtype = torch.float16
         with torch.autocast(device_type=self.device.type, dtype=autocast_dtype):
             preds = self.forward_test(p_imgs)
 
