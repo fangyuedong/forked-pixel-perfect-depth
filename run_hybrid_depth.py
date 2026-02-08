@@ -44,6 +44,7 @@ from ppd.utils.depth_normalization import normalize_depth_for_ppd, denormalize_d
 from ppd.utils.diffusion.schedule import LinearSchedule
 from ppd.utils.diffusion.sampler import EulerSampler
 from ppd.utils.diffusion.timesteps import Timesteps
+from ppd.utils.transform import resize_keep_aspect, image2tensor
 from ppd.utils.utils import has_native_bf16
 
 
@@ -204,8 +205,11 @@ if __name__ == '__main__':
         image = cv2.imread(filename)
         H, W = image.shape[:2]
 
+        # Resize the image to match the training resolution area while keeping the original aspect ratio
+        resize_image = resize_keep_aspect(image)
+
         # ===== Stage 1: MoGe-2 Metric Depth =====
-        moge_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        moge_image = cv2.cvtColor(resize_image, cv2.COLOR_BGR2RGB)
         moge_image_tensor = torch.tensor(
             moge_image / 255,
             dtype=torch.float32,
@@ -240,6 +244,7 @@ if __name__ == '__main__':
                 edge_mask=edge_mask,
                 num_steps=args.sampling_steps
             )
+            print(refined_depth_norm.shape, refined_depth_norm.mean().item())
 
         # Convert back to metric scale
         refined_depth_metric = denormalize_depth_from_ppd(
@@ -248,7 +253,10 @@ if __name__ == '__main__':
             moge_mask_tensor,
             norm_params
         )
-        refined_depth_np = refined_depth_metric.squeeze().cpu().numpy()
+        refined_depth_metric_np = refined_depth_metric.squeeze().cpu().numpy()
+
+        # Resize depth back to original image size for visualization
+        refined_depth_np = cv2.resize(refined_depth_metric_np, (W, H), interpolation=cv2.INTER_LINEAR)
 
         # ===== Save Visualization =====
         depth_vis = (
@@ -274,6 +282,8 @@ if __name__ == '__main__':
         # ===== Save Edge Mask (optional) =====
         if args.save_edge_mask:
             edge_vis = (edge_mask.squeeze().cpu().numpy() * 255).astype(np.uint8)
+            # Resize edge mask back to original image size
+            edge_vis = cv2.resize(edge_vis, (W, H), interpolation=cv2.INTER_NEAREST)
             cv2.imwrite(
                 os.path.join(args.outdir, 'edge_' + os.path.splitext(os.path.basename(filename))[0] + '.png'),
                 edge_vis
@@ -292,10 +302,19 @@ if __name__ == '__main__':
         if args.save_pcd:
             pcd_dir = os.path.join(args.outdir, 'depth_pcd')
             os.makedirs(pcd_dir, exist_ok=True)
+
+            # Scale intrinsic to match the resized image dimensions
+            resize_H, resize_W = resize_image.shape[:2]
+            intrinsic_scaled = intrinsic.copy()
+            intrinsic_scaled[0, 0] *= resize_W
+            intrinsic_scaled[1, 1] *= resize_H
+            intrinsic_scaled[0, 2] *= resize_W
+            intrinsic_scaled[1, 2] *= resize_H
+
             pcd = depth2pcd(
-                refined_depth_np,
-                intrinsic,
-                color=cv2.cvtColor(image, cv2.COLOR_BGR2RGB),
+                refined_depth_metric_np,  # Use depth at resized resolution
+                intrinsic_scaled,
+                color=cv2.cvtColor(resize_image, cv2.COLOR_BGR2RGB),  # Use resized image
                 input_mask=mask,
                 ret_pcd=True
             )

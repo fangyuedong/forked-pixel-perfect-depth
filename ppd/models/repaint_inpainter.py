@@ -99,7 +99,7 @@ class RePaintInpainter:
         T = self.schedule.T
 
         # Initialize with random noise
-        x_t = torch.randn_like(known_depth)
+        x_t = torch.randn(size=known_depth.shape).to(self.device)
 
         # Get semantic features (computed once for efficiency)
         semantics = self.sem_encoder.forward_semantics(rgb_condition)
@@ -145,7 +145,7 @@ class RePaintInpainter:
                     x_t = x_t_minus_1
 
         # Final output
-        refined_depth = x_t
+        refined_depth = x_t + 0.5
 
         return refined_depth
 
