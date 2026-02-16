@@ -1,14 +1,14 @@
 """
-Hybrid Depth Estimation Pipeline: MoGe-2 + Pixel-Perfect Depth + RePaint
+Hybrid Depth Estimation Pipeline: MoGe-2 + Pixel-Perfect Depth + LanPaint
 
 This script implements a two-stage depth estimation pipeline:
 1. Stage 1: MoGe-2 provides metric absolute depth
-2. Stage 2: Pixel-Perfect Depth with RePaint-style edge-aware refinement
+2. Stage 2: Pixel-Perfect Depth with LanPaint-style edge-aware refinement
 
 The pipeline:
 - Uses MoGe-2 for initial metric depth estimation
 - Detects edges in the depth map
-- Refines edge regions using PPD with RePaint-style inpainting
+- Refines edge regions using PPD with LanPaint-style inpainting (Fast Langevin Dynamics)
 - Preserves non-edge regions from the original MoGe-2 depth
 
 Usage:
@@ -20,9 +20,12 @@ Usage:
     # With edge mask debugging
     python run_hybrid_depth.py --img_path assets/examples/images --save_edge_mask
 
+    # Adjust FLD parameters
+    python run_hybrid_depth.py --img_path assets/examples/images --fld_steps 10 --fld_lambda 32.0
+
 Reference:
     - Pixel-Perfect Depth: https://github.com/fengxyxl/Pixel-Perfect-Depth
-    - RePaint: https://arxiv.org/abs/2201.09865
+    - LanPaint: https://arxiv.org/abs/2502.03491
 """
 
 import argparse
@@ -39,7 +42,7 @@ from ppd.utils.depth2pcd import depth2pcd
 from ppd.moge.model.v2 import MoGeModel
 from ppd.models.ppd import PixelPerfectDepth
 from ppd.models.edge_detector import EdgeDetector
-from ppd.models.repaint_inpainter import RePaintInpainter
+from ppd.models.lanpaint_inpainter import LanPaintInpainter
 from ppd.utils.depth_normalization import normalize_depth_for_ppd, denormalize_depth_from_ppd
 from ppd.utils.diffusion.schedule import LinearSchedule
 from ppd.utils.diffusion.sampler import EulerSampler
@@ -52,7 +55,7 @@ if __name__ == '__main__':
     set_seed(666)
 
     parser = argparse.ArgumentParser(
-        description='Hybrid Depth: MoGe-2 + PPD + RePaint'
+        description='Hybrid Depth: MoGe-2 + PPD + LanPaint'
     )
     parser.add_argument(
         '--img_path',
@@ -80,10 +83,28 @@ if __name__ == '__main__':
         help='Number of diffusion sampling steps'
     )
     parser.add_argument(
-        '--resampling_steps',
+        '--fld_steps',
         type=int,
-        default=1,
-        help='RePaint resampling steps U (default: 1, no resampling)'
+        default=5,
+        help='FLD iterations per diffusion step N (default: 5)'
+    )
+    parser.add_argument(
+        '--fld_step_size',
+        type=float,
+        default=0.2,
+        help='Langevin step size eta (default: 0.2)'
+    )
+    parser.add_argument(
+        '--fld_lambda',
+        type=float,
+        default=16.0,
+        help='BiG Score guidance strength lambda (default: 16.0)'
+    )
+    parser.add_argument(
+        '--fld_friction',
+        type=float,
+        default=15.0,
+        help='Langevin friction coefficient Gamma (default: 15.0)'
     )
     parser.add_argument(
         '--edge_threshold',
@@ -149,7 +170,10 @@ if __name__ == '__main__':
     print(f'Loading models on {DEVICE}...')
     print(f'  Semantic model: {args.semantics_model}')
     print(f'  Sampling steps: {args.sampling_steps}')
-    print(f'  Resampling steps: {args.resampling_steps}')
+    print(f'  FLD steps (N): {args.fld_steps}')
+    print(f'  FLD step size: {args.fld_step_size}')
+    print(f'  FLD lambda: {args.fld_lambda}')
+    print(f'  FLD friction: {args.fld_friction}')
 
     # Load MoGe-2 for metric depth
     moge = MoGeModel.from_pretrained("checkpoints/moge2.pt").to(DEVICE).eval()
@@ -168,14 +192,17 @@ if __name__ == '__main__':
     timesteps = Timesteps(T=1000, steps=args.sampling_steps, device=DEVICE)
     sampler = EulerSampler(schedule, timesteps, 'velocity')
 
-    # Initialize RePaint inpainter
-    inpainter = RePaintInpainter(
+    # Initialize LanPaint inpainter
+    inpainter = LanPaintInpainter(
         schedule=schedule,
         sampler=sampler,
         dit_model=model.dit,
         sem_encoder=model.sem_encoder,
         device=DEVICE,
-        resampling_steps=args.resampling_steps
+        n_steps=args.fld_steps,
+        step_size=args.fld_step_size,
+        lambda_big=args.fld_lambda,
+        friction=args.fld_friction
     )
 
     # Initialize edge detector
@@ -235,7 +262,7 @@ if __name__ == '__main__':
         # ===== RGB Condition for PPD =====
         rgb_condition = moge_image_tensor.unsqueeze(0)  # (1, 3, H, W) in [-0.5, 0.5]
 
-        # ===== Stage 2: PPD + RePaint Refinement =====
+        # ===== Stage 2: PPD + LanPaint Refinement =====
         autocast_dtype = torch.bfloat16 if has_native_bf16() else torch.float16
         with torch.autocast(device_type=DEVICE.type, dtype=autocast_dtype):
             refined_depth_norm = inpainter.inpaint(
