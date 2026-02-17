@@ -122,6 +122,11 @@ class LanPaintInpainter:
             # 8. Convert back to model format
             x_t = self.internal_to_model(x_t, abt)
 
+            # 9. Standard denoise step (Euler sampler)
+            dit_input = torch.cat([x_t, rgb_condition - 0.5], dim=1)
+            pred = self.dit_model(x=dit_input, semantics=semantics, timestep=t)
+            x_t = self.sampler.step(pred=pred, x_t=x_t, t=t)
+
         # 9. Final output (add 0.5 to convert from latent space)
         return torch.clamp(x_t + 0.5, 0.0, 1.0)
 
@@ -165,8 +170,9 @@ class LanPaintInpainter:
         Returns:
             Updated latent state with known regions replaced
         """
-        known_latent = known_depth - 0.5  # Convert to latent space
-        return x * (1 - edge_mask) + known_latent * edge_mask
+        known_latent = known_depth  # Convert to latent space
+        # edge_mask=1: edges (refine with x), edge_mask=0: non-edges (preserve known_latent)
+        return x * edge_mask + known_latent * (1 - edge_mask)
 
     def model_to_internal(self, x, abt):
         """
@@ -227,7 +233,7 @@ class LanPaintInpainter:
         pred_x0, _ = self.schedule.convert_from_pred(pred, 'velocity', x_t, timestep)
 
         # Simplified BiG Score (single inference version)
-        y = known_depth - 0.5  # Convert to latent space
+        y = known_depth  # Convert to latent space
 
         # Standard score for unknown regions
         score_unknown = -(x_t - pred_x0)
@@ -236,7 +242,8 @@ class LanPaintInpainter:
         score_known = (1 + self.lambda_big) * (y - x_t) - self.lambda_big * score_unknown
 
         # Mix based on edge mask
-        score = score_unknown * (1 - edge_mask) + score_known * edge_mask
+        # edge_mask=1: edges (use score_unknown), edge_mask=0: non-edges (use score_known)
+        score = score_unknown * edge_mask + score_known * (1 - edge_mask)
         return score
 
     def langevin_dynamics(self, x_t, score_func, mask, current_times, args=None):
@@ -262,10 +269,11 @@ class LanPaintInpainter:
         )
 
         # 2. Mix parameters based on mask
-        A = A_x * (1 - mask) + A_y * mask
-        D = D_x * (1 - mask) + D_y * mask
-        dt = dtx * (1 - mask) + dty * mask
-        Gamma = Gamma_x * (1 - mask) + Gamma_y * mask
+        # mask=1 (edges): use _x parameters (unknown regions), mask=0 (non-edges): use _y parameters (known regions)
+        A = A_x * mask + A_y * (1 - mask)
+        D = D_x * mask + D_y * (1 - mask)
+        dt = dtx * mask + dty * (1 - mask)
+        Gamma = Gamma_x * mask + Gamma_y * (1 - mask)
 
         # 3. Compute constant force term C
         def Coef_C(x_t):
