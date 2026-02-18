@@ -1,294 +1,300 @@
-"""
-Numerically stable mathematical utilities for Langevin dynamics.
-
-Adapted from LanPaint: https://arxiv.org/abs/2502.03491
-"""
-
 import torch
-
-
 def epxm1_x(x):
-    """
-    Compute (exp(x) - 1) / x with numerical stability for x -> 0.
-
-    This function handles the singularity at x=0 using Taylor expansion.
-
-    Args:
-        x: Input tensor
-
-    Returns:
-        (exp(x) - 1) / x, with proper handling for x -> 0
-
-    Note:
-        Taylor expansion for x -> 0: (e^x - 1)/x ≈ 1 + x/2 + x²/6
-    """
+    # Compute the (exp(x) - 1) / x term with a small value to avoid division by zero.
     result = torch.special.expm1(x) / x
+    # replace NaN or inf values with 0
     result = torch.where(torch.isfinite(result), result, torch.zeros_like(result))
     mask = torch.abs(x) < 1e-2
-    # Taylor expansion: (e^x - 1)/x ≈ 1 + x/2 + x²/6
     result = torch.where(mask, 1 + x/2. + x**2 / 6., result)
     return result
-
-
 def epxm1mx_x2(x):
-    """
-    Compute (exp(x) - 1 - x) / x² with numerical stability for x -> 0.
-
-    This function handles the singularity at x=0 using Taylor expansion.
-
-    Args:
-        x: Input tensor
-
-    Returns:
-        (exp(x) - 1 - x) / x², with proper handling for x -> 0
-
-    Note:
-        Taylor expansion for x -> 0: (e^x - 1 - x)/x² ≈ 1/2 + x/6 + x²/24
-    """
-    result = (torch.special.expm1(x) - x) / (x * x)
+    # Compute the (exp(x) - 1 - x) / x**2 term with a small value to avoid division by zero.
+    result = (torch.special.expm1(x) - x) / x**2
+    # replace NaN or inf values with 0
     result = torch.where(torch.isfinite(result), result, torch.zeros_like(result))
-    mask = torch.abs(x) < 1e-2
-    # Taylor expansion: (e^x - 1 - x)/x² ≈ 1/2 + x/6 + x²/24
-    result = torch.where(mask, 0.5 + x/6. + x**2 / 24., result)
+    mask = torch.abs(x**2) < 1e-2
+    result = torch.where(mask, 1/2. + x/6 + x**2 / 24 + x**3 / 120, result)
     return result
 
+def expm1mxmhx2_x3(x):
+    # Compute the (exp(x) - 1 - x - x**2 / 2) / x**3 term with a small value to avoid division by zero.
+    result = (torch.special.expm1(x) - x - x**2 / 2) / x**3
+    # replace NaN or inf values with 0
+    result = torch.where(torch.isfinite(result), result, torch.zeros_like(result))
+    mask = torch.abs(x**3) < 1e-2
+    result = torch.where(mask, 1/6 + x/24 + x**2 / 120 + x**3 / 720 + x**4 / 5040, result)
+    return result
 
 def exp_1mcosh_GD(gamma_t, delta):
     """
-    Compute e^(-Γt) * (1 - cosh(Γt√Δ)) / ((Γt)² * Δ) with numerical stability.
+    Compute e^(-Γt) * (1 - cosh(Γt√Δ))/ ( (Γt)**2 Δ )
 
-    This function handles the limit when Δ -> 0.
-
-    Args:
-        gamma_t: Product of friction coefficient Gamma and time t
-        delta: Parameter Delta = 1 - 4A/Γ²
+    Parameters:
+    gamma_t: Γ*t term (could be a scalar or tensor)
+    delta: Δ term (could be a scalar or tensor)
 
     Returns:
-        The computed value with proper handling for delta -> 0
-
-    Note:
-        When delta -> 0, the limit is -exp(-Γt) / (Γt)²
+    Result of the computation with numerical stability handling
     """
-    # Limit when delta -> 0
-    result = -torch.expm1(-gamma_t) / (gamma_t * gamma_t + 1e-8)
-    mask = torch.abs(delta) > 1e-6
+    # Main computation
+    is_positive = delta > 0
+    sqrt_abs_delta = torch.sqrt(torch.abs(delta))
+    gamma_t_sqrt_delta = gamma_t * sqrt_abs_delta
+    numerator_pos =  torch.exp(-gamma_t) - (torch.exp(gamma_t * (sqrt_abs_delta - 1)) + torch.exp(gamma_t * (-sqrt_abs_delta - 1))) / 2
+    numerator_neg = torch.exp(-gamma_t) * ( 1 -  torch.cos(gamma_t * sqrt_abs_delta ) )
+    numerator = torch.where(is_positive, numerator_pos, numerator_neg)
+    result =  numerator / (delta * gamma_t**2 )
+    # Handle NaN/inf cases
+    result = torch.where(torch.isfinite(result), result, torch.zeros_like(result))
+    # Handle numerical instability for small delta
+    mask = torch.abs(gamma_t_sqrt_delta**2) < 5e-2
+    taylor = ( -0.5  - gamma_t**2 / 24 * delta - gamma_t**4 / 720 * delta**2 ) * torch.exp(-gamma_t)
+    result = torch.where(mask, taylor, result)
+    return result
 
-    # Full expression when delta != 0
-    gamma_t_sqrt_delta = gamma_t * torch.sqrt(torch.clamp(delta, min=0.0))
-    cosh_val = torch.cosh(gamma_t_sqrt_delta)
-    numerator = torch.exp(-gamma_t) * (1 - cosh_val)
-    denominator = (gamma_t * gamma_t) * delta
-    result_full = numerator / (denominator + 1e-8)
+def exp_sinh_GsqrtD(gamma_t, delta):
+    """
+    Compute e^(-Γt) * sinh(Γt√Δ) / (Γt√Δ)
 
-    result = torch.where(mask, result_full, result)
-    return torch.where(torch.isfinite(result), result, torch.zeros_like(result))
+    Parameters:
+    gamma_t: Γ*t term (could be a scalar or tensor)
+    delta: Δ term (could be a scalar or tensor)
 
+    Returns:
+    Result of the computation with numerical stability handling
+    """
+    # Main computation
+    is_positive = delta > 0
+    sqrt_abs_delta = torch.sqrt(torch.abs(delta))
+    gamma_t_sqrt_delta = gamma_t * sqrt_abs_delta
+    numerator_pos =  (torch.exp(gamma_t * (sqrt_abs_delta - 1)) - torch.exp(gamma_t * (-sqrt_abs_delta - 1))) / 2
+    result_pos = numerator_pos / gamma_t_sqrt_delta
+    result_pos = torch.where(torch.isfinite(result_pos), result_pos, torch.zeros_like(result_pos))
+
+    # Taylor expansion for small gamma_t_sqrt_delta
+    mask = torch.abs(gamma_t_sqrt_delta) < 1e-2
+    taylor = ( 1  + gamma_t**2 / 6 * delta + gamma_t**4 / 120 * delta**2 ) * torch.exp(-gamma_t)
+    result_pos = torch.where(mask, taylor, result_pos)
+
+    # Handle negative delta
+    result_neg = torch.exp(-gamma_t) * torch.special.sinc(gamma_t_sqrt_delta/torch.pi)
+    result = torch.where(is_positive, result_pos, result_neg)
+    return result
+
+def exp_cosh(gamma_t, delta):
+    """
+    Compute e^(-Γt) * cosh(Γt√Δ)
+
+    Parameters:
+    gamma_t: Γ*t term (could be a scalar or tensor)
+    delta: Δ term (could be a scalar or tensor)
+
+    Returns:
+    Result of the computation with numerical stability handling
+    """
+    exp_1mcosh_GD_result = exp_1mcosh_GD(gamma_t, delta) # e^(-Γt) * (1 - cosh(Γt√Δ))/ ( (Γt)**2 Δ )
+    result = torch.exp(-gamma_t) - gamma_t**2 * delta * exp_1mcosh_GD_result
+    return result
+def exp_sinh_sqrtD(gamma_t, delta):
+    """
+    Compute e^(-Γt) * sinh(Γt√Δ) / √Δ
+    Parameters:
+    gamma_t: Γ*t term (could be a scalar or tensor)
+    delta: Δ term (could be a scalar or tensor)
+    Returns:
+    Result of the computation with numerical stability handling
+    """
+    exp_sinh_GsqrtD_result = exp_sinh_GsqrtD(gamma_t, delta) # e^(-Γt) * sinh(Γt√Δ) / (Γt√Δ)
+    result = gamma_t * exp_sinh_GsqrtD_result
+    return result
+
+
+
+def zeta1(gamma_t, delta):
+    # Compute hyperbolic terms and exponential
+    half_gamma_t = gamma_t / 2
+    exp_cosh_term = exp_cosh(half_gamma_t, delta)
+    exp_sinh_term = exp_sinh_sqrtD(half_gamma_t, delta)
+
+
+    # Main computation
+    numerator = 1 - (exp_cosh_term + exp_sinh_term)
+    denominator = gamma_t * (1 - delta) / 4
+    result = 1 - numerator / denominator
+
+    # Handle numerical instability
+    result = torch.where(torch.isfinite(result), result, torch.zeros_like(result))
+
+    # Taylor expansion for small x (similar to your epxm1Dx approach)
+    mask = torch.abs(denominator) < 5e-3
+    term1 = epxm1_x(-gamma_t)
+    term2 = epxm1mx_x2(-gamma_t)
+    term3 = expm1mxmhx2_x3(-gamma_t)
+    taylor = term1 + (1/2.+ term1-3*term2)*denominator + (-1/6. + term1/2 - 4 * term2 + 10 * term3) * denominator**2
+    result = torch.where(mask, taylor, result)
+
+    return result
+
+def exp_cosh_minus_terms(gamma_t, delta):
+    """
+    Compute E^(-tΓ) * (Cosh[tΓ] - 1 - (Cosh[tΓ√Δ] - 1)/Δ) / (tΓ(1 - Δ))
+
+    Parameters:
+    gamma_t: Γ*t term (could be a scalar or tensor)
+    delta: Δ term (could be a scalar or tensor)
+
+    Returns:
+    Result of the computation with numerical stability handling
+    """
+    exp_term = torch.exp(-gamma_t)
+    # Compute individual terms
+    exp_cosh_term = exp_cosh(gamma_t, gamma_t**0) - exp_term # E^(-tΓ) (Cosh[tΓ] - 1) term
+    exp_cosh_delta_term = - gamma_t**2 * exp_1mcosh_GD(gamma_t, delta)  # E^(-tΓ) (Cosh[tΓ√Δ] - 1)/Δ term
+
+    #exp_1mcosh_GD e^(-Γt) * (1 - cosh(Γt√Δ))/ ( (Γt)**2 Δ )
+    # Main computation
+    numerator = exp_cosh_term - exp_cosh_delta_term
+    denominator = gamma_t * (1 - delta)
+
+    result = numerator / denominator
+
+    # Handle numerical instability
+    result = torch.where(torch.isfinite(result), result, torch.zeros_like(result))
+
+    # Taylor expansion for small gamma_t and delta near 1
+    mask = (torch.abs(denominator) < 1e-1)
+    exp_1mcosh_GD_term = exp_1mcosh_GD(gamma_t, delta**0)
+    taylor = (
+       gamma_t*exp_1mcosh_GD_term + 0.5 * gamma_t * exp_sinh_GsqrtD(gamma_t, delta**0) 
+       - denominator / 4 * ( 0.5 * exp_cosh(gamma_t, delta**0) - 4 * exp_1mcosh_GD_term - 5 /2 * exp_sinh_GsqrtD(gamma_t, delta**0) )
+    )
+    result = torch.where(mask, taylor, result)
+
+    return result
+
+
+def zeta2(gamma_t, delta):
+    half_gamma_t = gamma_t / 2
+    return exp_sinh_GsqrtD(half_gamma_t, delta)
+
+def sig11(gamma_t, delta):
+    return 1 - torch.exp(-gamma_t) + gamma_t**2 * exp_1mcosh_GD(gamma_t, delta) + exp_sinh_sqrtD(gamma_t, delta)
+
+
+def Zcoefs(gamma_t, delta):
+    Zeta1 = zeta1(gamma_t, delta)
+    Zeta2 = zeta2(gamma_t, delta)
+
+    sq_total = 1 - Zeta1 + gamma_t * (delta - 1) * (Zeta1 - 1)**2 / 8
+    amplitude = torch.sqrt(sq_total)
+    Zcoef1 = ( gamma_t**0.5 * Zeta2 / 2 **0.5 ) / amplitude
+    Zcoef2 = Zcoef1 * gamma_t *( - 2 * exp_1mcosh_GD(gamma_t, delta)  / sig11(gamma_t, delta)  ) ** 0.5 
+    #cterm = exp_cosh_minus_terms(gamma_t, delta)
+    #sterm = exp_sinh_sqrtD(gamma_t, delta**0) + exp_sinh_sqrtD(gamma_t, delta)
+    #Zcoef3 = 2 * torch.sqrt(  cterm / ( gamma_t * (1 - delta) * cterm + sterm ) )
+    Zcoef3 = torch.sqrt( torch.maximum(1 - Zcoef1**2 - Zcoef2**2, sq_total.new_zeros(sq_total.shape)) )
+
+    return Zcoef1 * amplitude, Zcoef2 * amplitude, Zcoef3 * amplitude, amplitude
+
+def Zcoefs_asymp(gamma_t, delta):
+    A_t = (gamma_t * (1 - delta) )/4
+    return epxm1_x(- 2 * A_t)
 
 class StochasticHarmonicOscillator:
     """
-    Stochastic Harmonic Oscillator solver for Langevin dynamics.
+    Simulates a stochastic harmonic oscillator governed by the equations:
+        dy(t) = q(t) dt
+        dq(t) = -Γ A y(t) dt + Γ C dt + Γ D dw(t) - Γ q(t) dt
 
-    This class implements the analytical solution for the underdamped,
-    critically damped, and overdamped regimes of the harmonic oscillator
-    with stochastic forcing.
+    Also define v(t) = q(t) / √Γ, which is numerically more stable.
 
-    The dynamics follow:
-        dz/dτ = q/√Γ
-        dq/dτ = -Γz - ΓΔz/4 + C + ξ(τ)
-
-    where ξ is Gaussian noise with <ξ(τ)ξ(τ')> = 2D δ(τ-τ').
-
-    Args:
-        Gamma: Friction coefficient Γ
-        A: Harmonic potential strength A = Γ²(1-Δ)/4
-        C: Constant force term
-        D: Noise amplitude D
-
-    Reference:
-        LanPaint paper, Section 3.2 and Appendix A
+    Where:
+        y(t) - Position variable
+        q(t) - Velocity variable
+        Γ - Damping coefficient
+        A - Harmonic potential strength
+        C - Constant force term
+        D - Noise amplitude
+        dw(t) - Wiener process (Brownian motion)
     """
-
     def __init__(self, Gamma, A, C, D):
-        """
-        Initialize the stochastic harmonic oscillator.
-
-        Args:
-            Gamma: Friction coefficient (can be a tensor for spatially varying friction)
-            A: Harmonic potential strength (can be a tensor)
-            C: Constant force term (can be a tensor)
-            D: Noise amplitude (can be a tensor)
-        """
         self.Gamma = Gamma
         self.A = A
         self.C = C
         self.D = D
-
+        self.Delta = 1 - 4 * A / Gamma
+    def sig11(self, gamma_t, delta):
+        return 1 - torch.exp(-gamma_t) + gamma_t**2 * exp_1mcosh_GD(gamma_t, delta) + exp_sinh_sqrtD(gamma_t, delta)
+    def sig22(self, gamma_t, delta):
+        return 1- zeta1(2*gamma_t, delta) + 2 * gamma_t * exp_1mcosh_GD(gamma_t, delta) 
     def dynamics(self, y0, v0, t):
         """
-        Compute position and velocity after time t.
+        Calculates the position and velocity variables at time t.
 
-        This method computes the analytical solution of the stochastic
-        harmonic oscillator for time t, handling all three damping regimes.
-
-        Args:
-            y0: Initial position z(τ)
-            v0: Initial velocity q(τ)/√Γ (can be None for first step)
-            t: Time step Δτ
-
+        Parameters:
+            y0 (float): Initial position
+            v0 (float): Initial velocity v(0) = q(0) / √Γ
+            t (float): Time at which to evaluate the dynamics
         Returns:
-            Tuple of (y(t), v(t)): Position and velocity at time τ+t
-
-        Note:
-            The solution depends on the damping regime determined by Delta:
-            - Delta < 0: Underdamped (oscillatory)
-            - Delta ≈ 0: Critically damped
-            - Delta > 0: Overdamped
+            tuple: (y(t), v(t))
         """
-        # Compute Delta parameter
-        Delta = 1 - 4 * self.A / (self.Gamma ** 2 + 1e-8)
 
-        # Determine damping regime
-        mask_underdamped = Delta < 0
-        mask_critical = torch.abs(Delta) < 1e-6
-        mask_overdamped = (~mask_underdamped) & (~mask_critical)
+        dummyzero = y0.new_zeros(1) # convert scalar to tensor with same device and dtype as y0
+        Delta = self.Delta + dummyzero
+        Gamma_hat = self.Gamma * t + dummyzero
+        A = self.A + dummyzero
+        C = self.C + dummyzero
+        D = self.D + dummyzero
+        Gamma = self.Gamma + dummyzero
+        zeta_1 = zeta1( Gamma_hat, Delta) 
+        zeta_2 = zeta2( Gamma_hat, Delta)
+        EE = 1 - Gamma_hat * zeta_2
 
-        # Compute solutions for each regime
-        y_under, v_under = self._underdamped(y0, v0, t, Delta)
-        y_crit, v_crit = self._critical(y0, v0, t)
-        y_over, v_over = self._overdamped(y0, v0, t, Delta)
+        if v0 is None:
+            v0 = torch.randn_like(y0) * D / 2 ** 0.5
+            #v0 = (C - A * y0)/Gamma**0.5
 
-        # Select appropriate solution based on regime
-        y = torch.where(mask_underdamped, y_under,
-                       torch.where(mask_critical, y_crit, y_over))
-        v = torch.where(mask_underdamped, v_under,
-                       torch.where(mask_critical, v_crit, v_over))
+        # Calculate mean position and velocity
+        term1 = (1 - zeta_1) * (C * t - A * t * y0) + zeta_2 * (Gamma ** 0.5) * v0 * t
+        y_mean = term1 + y0
+        v_mean =  (1 - EE)*(C - A * y0) / (Gamma ** 0.5) + (EE - A * t * (1 - zeta_1)) * v0
 
-        return y, v
+        cov_yy = D**2 * t * self.sig22(Gamma_hat, Delta)
+        cov_vv = D**2 * self.sig11(Gamma_hat, Delta) / 2
+        cov_yv = (zeta2(Gamma_hat, Delta) * Gamma_hat * D ) **2 / 2 / (Gamma ** 0.5)
 
-    def _underdamped(self, y0, v0, t, Delta):
-        """
-        Underdamped regime (Delta < 0): oscillatory solution.
+        # sample new position and velocity with multivariate normal distribution
 
-        The solution involves oscillations with frequency ω = √(-Δ) Γ/2.
+        batch_shape = y0.shape
+        cov_matrix = torch.zeros(*batch_shape, 2, 2, device=y0.device, dtype=y0.dtype)
+        cov_matrix[..., 0, 0] = cov_yy
+        cov_matrix[..., 0, 1] = cov_yv
+        cov_matrix[..., 1, 0] = cov_yv  # symmetric
+        cov_matrix[..., 1, 1] = cov_vv
 
-        Args:
-            y0: Initial position
-            v0: Initial velocity
-            t: Time step
-            Delta: Damping parameter (negative)
 
-        Returns:
-            Tuple of (position, velocity)
-        """
-        omega = torch.sqrt(-Delta + 1e-8) * self.Gamma / 2
-        gt = self.Gamma * t / 2
 
-        exp_neg = torch.exp(-gt)
-        cos_omega = torch.cos(omega * t)
-        sin_omega = torch.sin(omega * t)
+        # Compute the Cholesky decomposition to get scale_tril
+        #scale_tril = torch.linalg.cholesky(cov_matrix)
+        scale_tril = torch.zeros(*batch_shape, 2, 2, device=y0.device, dtype=y0.dtype)
+        tol = 1e-8
+        cov_yy = torch.clamp( cov_yy, min = tol )
+        sd_yy = torch.sqrt( cov_yy )
+        inv_sd_yy = 1/(sd_yy)
 
-        # Position: combination of decaying exponential and oscillatory terms
-        term1 = exp_neg * (self.Gamma * cos_omega + 2 * omega * sin_omega)
-        term1 = term1 / (self.Gamma + 1e-8)
-        y = term1 * y0
+        scale_tril[..., 0, 0] = sd_yy
+        scale_tril[..., 0, 1] = 0.
+        scale_tril[..., 1, 0] = cov_yv * inv_sd_yy
+        scale_tril[..., 1, 1] = torch.clamp( cov_vv - cov_yv**2 / cov_yy, min = tol ) ** 0.5
+        # check if it matches torch.linalg.
+        #assert torch.allclose(torch.linalg.cholesky(cov_matrix), scale_tril, atol = 1e-4, rtol = 1e-4 )
+        # Sample correlated noise from multivariate normal
+        mean = torch.zeros(*batch_shape, 2, device=y0.device, dtype=y0.dtype)
+        mean[..., 0] = y_mean
+        mean[..., 1] = v_mean
+        new_yv = torch.distributions.MultivariateNormal(
+            loc=mean,
+            scale_tril=scale_tril
+        ).sample()
 
-        term2 = 2 * exp_neg * sin_omega / (omega + 1e-8)
-        y = y + term2 * v0
-
-        term3 = 4 * self.C / (self.Gamma ** 2 + 1e-8)
-        term3 = term3 * (1 - exp_neg * cos_omega)
-        y = y + term3
-
-        # Velocity: derivative of position
-        term1_v = exp_neg * ((-self.Gamma ** 2 + 4 * omega ** 2) * cos_omega +
-                            3 * self.Gamma * omega * sin_omega)
-        term1_v = term1_v / (2 * omega * self.Gamma + 1e-8)
-        v = term1_v * y0
-
-        term2_v = exp_neg * (self.Gamma * cos_omega - 2 * omega * sin_omega)
-        term2_v = term2_v / (self.Gamma + 1e-8)
-        v = v + term2_v * v0
-
-        term3_v = 4 * self.C * (1 + self.Gamma * t) / (self.Gamma + 1e-8)
-        term3_v = term3_v * exp_neg * sin_omega / (omega + 1e-8)
-        v = v + term3_v
-
-        return y, v
-
-    def _critical(self, y0, v0, t):
-        """
-        Critically damped regime (Delta ≈ 0): optimal damping solution.
-
-        This is the boundary case between underdamped and overdamped,
-        providing the fastest convergence without oscillations.
-
-        Args:
-            y0: Initial position
-            v0: Initial velocity
-            t: Time step
-
-        Returns:
-            Tuple of (position, velocity)
-        """
-        gt = self.Gamma * t / 2
-        exp_neg = torch.exp(-gt)
-
-        # Position: exponential decay without oscillation
-        y = exp_neg * (1 + gt / 2) * y0 + t * exp_neg * v0
-        y = y + (4 * self.C / (self.Gamma ** 2 + 1e-8)) * (1 - exp_neg * (1 + gt / 2))
-
-        # Velocity
-        v = -exp_neg * (gt / 2) * (self.Gamma / 2) * y0
-        v = v + exp_neg * (1 - gt / 2) * v0
-        v = v + (4 * self.C / (self.Gamma ** 2 + 1e-8)) * (1 - exp_neg * (1 - gt / 2)) * (self.Gamma / 2)
-
-        return y, v
-
-    def _overdamped(self, y0, v0, t, Delta):
-        """
-        Overdamped regime (Delta > 0): slow decay solution.
-
-        The solution involves two decaying exponentials with different rates.
-
-        Args:
-            y0: Initial position
-            v0: Initial velocity
-            t: Time step
-            Delta: Damping parameter (positive)
-
-        Returns:
-            Tuple of (position, velocity)
-        """
-        sqrt_delta = torch.sqrt(Delta + 1e-8)
-        gt = self.Gamma * t / 2
-
-        exp_pos = torch.exp(-gt * (1 - sqrt_delta))
-        exp_neg = torch.exp(-gt * (1 + sqrt_delta))
-
-        # Position: sum of two decaying exponentials
-        term1 = (self.Gamma * (exp_pos + exp_neg) + sqrt_delta * (exp_pos - exp_neg))
-        term1 = term1 / (2 * self.Gamma * sqrt_delta + 1e-8)
-        y = term1 * y0
-
-        term2 = (exp_pos - exp_neg) / (sqrt_delta + 1e-8)
-        y = y + term2 * v0
-
-        term3 = 4 * self.C / (self.Gamma ** 2 + 1e-8)
-        term3 = term3 * (1 - (exp_pos + exp_neg) / 2)
-        y = y + term3
-
-        # Velocity
-        term1_v = ((self.Gamma ** 2 * (1 + Delta) * (exp_pos - exp_neg) +
-                   2 * self.Gamma * sqrt_delta * (exp_pos + exp_neg)))
-        term1_v = term1_v / (4 * self.Gamma ** 2 * sqrt_delta + 1e-8)
-        v = term1_v * y0
-
-        term2_v = (self.Gamma * (exp_pos + exp_neg) + sqrt_delta * (exp_pos - exp_neg))
-        term2_v = term2_v / (2 * sqrt_delta + 1e-8)
-        v = v + term2_v * v0
-
-        term3_v = 4 * self.C / (self.Gamma ** 2 + 1e-8)
-        term3_v = term3_v * (1 - (exp_pos + exp_neg) / 2) * self.Gamma
-        v = v + term3_v
-
-        return y, v
+        return new_yv[...,0], new_yv[...,1]

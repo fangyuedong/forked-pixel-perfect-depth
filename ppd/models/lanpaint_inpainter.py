@@ -61,6 +61,23 @@ class LanPaintInpainter:
         self.beta = beta
         self.use_simplified_big = use_simplified_big
 
+        # For [B, C, H, W] tensors
+        self.img_dim_size = 4
+
+    def add_none_dims(self, array):
+        """Add singleton dimensions to match tensor layout.
+        Matches lanpaint.py:22-25 behavior.
+        """
+        index = (slice(None),) + (None,) * (self.img_dim_size - 1)
+        return array[index]
+
+    def remove_none_dims(self, array):
+        """Remove singleton dimensions.
+        Matches lanpaint.py:26-29 behavior.
+        """
+        index = (slice(None),) + (0,) * (self.img_dim_size - 1)
+        return array[index]
+
     @torch.no_grad()
     def inpaint(self, rgb_condition, known_depth, edge_mask, num_steps=None):
         """
@@ -98,6 +115,12 @@ class LanPaintInpainter:
             # 6. Convert to internal format
             x_t = self.model_to_internal(x_t, abt)
 
+            # 6.5. Compute adaptive step size (matching lanpaint.py:42-43)
+            # Adaptive step_size = base_step_size * (1 - abt)
+            # When abt -> 1 (clean image, small t): step_size -> 0 (small steps for stability)
+            # When abt -> 0 (pure noise, large t): step_size -> base_step_size (larger steps)
+            step_size_adaptive = self.step_size * (1 - abt)
+
             # 7. Inner loop: FLD iterations
             args = None  # LangevinState(v, C, x0)
             for i in range(self.n_steps):
@@ -113,9 +136,13 @@ class LanPaintInpainter:
                 x_t_prev = x_t.detach()
 
                 # 7c. Langevin dynamics update
+                # Matching lanpaint.py:75
                 x_t, args = self.langevin_dynamics(
                     x_t, score_func, edge_mask,
+                    step_size=self.add_none_dims(step_size_adaptive),
                     current_times=(VE_Sigma, abt, Flow_t),
+                    sigma_x=self.add_none_dims(self.sigma_x(abt)),
+                    sigma_y=self.add_none_dims(self.sigma_y(abt)),
                     args=args
                 )
 
@@ -246,7 +273,7 @@ class LanPaintInpainter:
         score = score_unknown * edge_mask + score_known * (1 - edge_mask)
         return score
 
-    def langevin_dynamics(self, x_t, score_func, mask, current_times, args=None):
+    def langevin_dynamics(self, x_t, score_func, mask, step_size, current_times, sigma_x=1, sigma_y=0, args=None):
         """
         Perform Langevin dynamics update using Stochastic Harmonic Oscillator.
 
@@ -257,16 +284,20 @@ class LanPaintInpainter:
             x_t: Current state (internal format)
             score_func: Score function
             mask: Edge mask
+            step_size: Adaptive Langevin step size (already scaled by (1-abt))
             current_times: Tuple of (VE_Sigma, abt, Flow_t)
+            sigma_x: Sigma for unknown regions (default: 1)
+            sigma_y: Sigma for known regions (default: 0)
             args: LangevinState (v, C, x0)
 
         Returns:
             Tuple of (x_t_next, LangevinState)
         """
-        # 1. Prepare parameters
-        sigma, abt, dtx, dty, Gamma_x, Gamma_y, A_x, A_y, D_x, D_y = self.prepare_step_size(
-            current_times, self.step_size
-        )
+        # 1. Prepare parameters with autocast (matching lanpaint.py:138-140)
+        with torch.autocast(device_type=x_t.device.type, dtype=torch.float32):
+            sigma, abt, dtx, dty, Gamma_x, Gamma_y, A_x, A_y, D_x, D_y = self.prepare_step_size(
+                current_times, step_size, sigma_x, sigma_y
+            )
 
         # 2. Mix parameters based on mask
         # mask=1 (edges): use _x parameters (unknown regions), mask=0 (non-edges): use _y parameters (known regions)
@@ -275,10 +306,10 @@ class LanPaintInpainter:
         dt = dtx * mask + dty * (1 - mask)
         Gamma = Gamma_x * mask + Gamma_y * (1 - mask)
 
-        # 3. Compute constant force term C
+        # 3. Compute constant force term C (matching lanpaint.py:154-157)
         def Coef_C(x_t):
             x0 = x_t + score_func(x_t)  # Tweedie estimator
-            C = (torch.sqrt(abt) * x0 - x_t) / (1 - abt + 1e-8) + A * x_t
+            C = (abt ** 0.5 * x0 - x_t) / (1 - abt) + A * x_t
             return C, x0
 
         # 4. Run damped dynamics with Strang splitting
@@ -291,10 +322,11 @@ class LanPaintInpainter:
                 v = args.v
                 C = args.C
                 # Strang splitting: half step C, half step dynamics, half step C
+                # Matching lanpaint.py:199-203
                 x_t, v = self.advance_time(x_t, v, dt/2, Gamma, A, C, D)
                 C_new, x0 = Coef_C(x_t)
-                v = v + torch.sqrt(Gamma + 1e-8) * (C_new - C) * dt
-                x_t, v = self.advance_time(x_t, v, dt/2, Gamma, A, C_new, D)
+                v = v + Gamma ** 0.5 * (C_new - C) * dt
+                x_t, v = self.advance_time(x_t, v, dt/2, Gamma, A, C, D)  # Use C (old), not C_new
                 C = C_new
             return x_t, LangevinState(v, C, x0)
 
@@ -310,7 +342,7 @@ class LanPaintInpainter:
 
         return x_t, state
 
-    def prepare_step_size(self, current_times, step_size):
+    def prepare_step_size(self, current_times, step_size, sigma_x, sigma_y):
         """
         Prepare all parameters for Langevin dynamics.
 
@@ -319,37 +351,44 @@ class LanPaintInpainter:
 
         Args:
             current_times: Tuple of (VE_Sigma, abt, Flow_t)
-            step_size: Langevin step size eta
+            step_size: Langevin step size eta (adaptive)
+            sigma_x: Sigma for unknown regions
+            sigma_y: Sigma for known regions
 
         Returns:
             Tuple of (sigma, abt, dtx, dty, Gamma_x, Gamma_y, A_x, A_y, D_x, D_y)
         """
+        # Unpack and expand dimensions (matching lanpaint.py:238-240)
         sigma, abt, flow_t = current_times
+        sigma = self.add_none_dims(sigma)
+        abt = self.add_none_dims(abt)
 
-        # Time steps
-        dtx = 2 * step_size * self.sigma_x(abt)
-        dty = 2 * step_size * self.sigma_y(abt)
+        # Time steps (use adaptive step_size)
+        # Matching lanpaint.py:242-243
+        dtx = 2 * step_size * sigma_x
+        dty = 2 * step_size * sigma_y
 
-        # Friction parameters
-        s = flow_t
-        Gamma_hat_x = self.friction ** 2 * step_size * self.sigma_x(abt) / 0.1 * s ** 0
-        Gamma_hat_y = self.friction ** 2 * step_size * self.sigma_y(abt) / 0.1 * s ** 0
+        # Friction parameters (use base self.step_size, NOT adaptive step_size)
+        # Matching lanpaint.py:249-250
+        # IMPORTANT: Use sigma**0 (not flow_t**0) to match original implementation
+        Gamma_hat_x = self.friction ** 2 * self.step_size * sigma_x / 0.1 * sigma ** 0
+        Gamma_hat_y = self.friction ** 2 * self.step_size * sigma_y / 0.1 * sigma ** 0
         Gamma_hat_x /= 2.0
         Gamma_hat_y /= 2.0
 
-        # Harmonic potential strengths
-        A_t_x = (1) / (1 - abt + 1e-8) * dtx / 2
-        A_t_y = (1 + self.lambda_big) / (1 - abt + 1e-8) * dty / 2
+        # Harmonic potential strengths (matching lanpaint.py:255-256)
+        A_t_x = (1) / (1 - abt) * dtx / 2
+        A_t_y = (1 + self.lambda_big) / (1 - abt) * dty / 2
 
-        # Normalize
-        A_x = A_t_x / (dtx / 2 + 1e-8)
-        A_y = A_t_y / (dty / 2 + 1e-8)
-        Gamma_x = Gamma_hat_x / (dtx / 2 + 1e-8)
-        Gamma_y = Gamma_hat_y / (dty / 2 + 1e-8)
+        # Normalize (matching lanpaint.py:259-262)
+        A_x = A_t_x / (dtx / 2)
+        A_y = A_t_y / (dty / 2)
+        Gamma_x = Gamma_hat_x / (dtx / 2)
+        Gamma_y = Gamma_hat_y / (dty / 2)
 
-        # Noise amplitudes
-        D_x = torch.sqrt(2 * abt ** 0 + 1e-8)
-        D_y = torch.sqrt(2 * abt ** 0 + 1e-8)
+        # Noise amplitudes (matching lanpaint.py:266-267)
+        D_x = (2 * abt ** 0) ** 0.5
+        D_y = (2 * abt ** 0) ** 0.5
 
         return sigma, abt, dtx/2, dty/2, Gamma_x, Gamma_y, A_x, A_y, D_x, D_y
 
