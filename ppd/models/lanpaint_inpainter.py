@@ -116,7 +116,9 @@ class LanPaintInpainter:
             num_steps = len(self.sampler.timesteps)
 
         # 1. Initialize random noise
-        x_t = torch.randn_like(known_depth)
+        # Use the same approach as PixelPerfectDepth.forward_test for consistency
+        # Generate on CPU first, then move to device (this ensures same RNG as PPD)
+        x_t = torch.randn(size=[known_depth.shape[0], 1, known_depth.shape[2], known_depth.shape[3]]).to(self.device)
 
         # 2. Compute semantics once
         semantics = self.sem_encoder.forward_semantics(rgb_condition)
@@ -131,8 +133,11 @@ class LanPaintInpainter:
             # 5. Replace step: ensure known regions are properly conditioned
             x_t = self.replace_step(x_t, known_depth, VE_Sigma, edge_mask)
 
-            # 6. Convert to internal format
-            x_t = self.model_to_internal(x_t, abt)
+            # 6. Convert to internal format for FLD
+            # IMPORTANT: Only convert when FLD is enabled (n_steps > 0)
+            # When n_steps=0, we must match PPD's forward_test exactly
+            if self.n_steps > 0:
+                x_t = self.model_to_internal(x_t, abt)
 
             # 6.5. Compute adaptive step size (matching lanpaint.py:42-43)
             # Adaptive step_size = base_step_size * (1 - abt)
@@ -166,7 +171,9 @@ class LanPaintInpainter:
                 )
 
             # 8. Convert back to model format
-            x_t = self.internal_to_model(x_t, abt)
+            # IMPORTANT: Only convert when FLD is enabled (n_steps > 0)
+            if self.n_steps > 0:
+                x_t = self.internal_to_model(x_t, abt)
 
             # 9. Standard denoise step (Euler sampler)
             dit_input = torch.cat([x_t, rgb_condition - 0.5], dim=1)
@@ -250,7 +257,7 @@ class LanPaintInpainter:
             Model format latent
         """
         factor = torch.sqrt(abt) + torch.sqrt(1 - abt + 1e-8)
-        return x_t / (factor + 1e-8)
+        return x_t / factor
 
     def compute_score(self, x_t, rgb_condition, known_depth, edge_mask, semantics, timestep):
         """
