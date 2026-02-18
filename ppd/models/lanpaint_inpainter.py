@@ -67,16 +67,35 @@ class LanPaintInpainter:
     def add_none_dims(self, array):
         """Add singleton dimensions to match tensor layout.
         Matches lanpaint.py:22-25 behavior.
+
+        Handles scalars (0-dim) and tensors of any dimension.
         """
-        index = (slice(None),) + (None,) * (self.img_dim_size - 1)
-        return array[index]
+        if array.dim() == 0:
+            # Scalar: add all dimensions
+            return array.reshape([1] * self.img_dim_size)
+        else:
+            # Tensor: add remaining dimensions
+            index = (slice(None),) + (None,) * (self.img_dim_size - array.dim())
+            return array[index]
 
     def remove_none_dims(self, array):
         """Remove singleton dimensions.
         Matches lanpaint.py:26-29 behavior.
+
+        Reduces tensor back to its original dimensionality.
         """
-        index = (slice(None),) + (0,) * (self.img_dim_size - 1)
-        return array[index]
+        if array.dim() == self.img_dim_size:
+            # Full tensor: remove all singleton dimensions
+            index = (slice(None),) + (0,) * (self.img_dim_size - 1)
+            return array[index]
+        elif array.dim() == 0:
+            # Already a scalar
+            return array
+        else:
+            # Partial tensor: remove appropriate number of dimensions
+            num_remove = self.img_dim_size - array.dim()
+            index = (slice(None),) + (0,) * num_remove if num_remove > 0 else (slice(None),)
+            return array[index]
 
     @torch.no_grad()
     def inpaint(self, rgb_condition, known_depth, edge_mask, num_steps=None):
