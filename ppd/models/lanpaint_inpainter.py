@@ -131,7 +131,7 @@ class LanPaintInpainter:
             VE_Sigma, abt, Flow_t = self.compute_time_parameters(t)
 
             # 5. Replace step: ensure known regions are properly conditioned
-            x_t = self.replace_step(x_t, known_depth, VE_Sigma, edge_mask)
+            x_t = self.replace_step(x_t, known_depth, Flow_t, edge_mask)
 
             # 6. Convert to internal format for FLD
             # IMPORTANT: Only convert when FLD is enabled (n_steps > 0)
@@ -208,24 +208,23 @@ class LanPaintInpainter:
 
         return VE_Sigma, abt, Flow_t
 
-    def replace_step(self, x, known_depth, VE_Sigma, edge_mask):
+    def replace_step(self, x, known_depth, Flow_t, edge_mask):
         """
         Replace step: ensure known regions are properly conditioned.
-
-        For RF/lerp, this simplifies to direct replacement in masked regions.
 
         Args:
             x: Current latent state
             known_depth: Known depth from MoGe-2 (in latent space: range [-0.5, 0.5])
-            VE_Sigma: Noise level (not used for RF)
+            Flow_t: RF time parameter (not used for RF)
             edge_mask: Edge mask (1=edges, 0=non-edges)
 
         Returns:
             Updated latent state with known regions replaced
         """
+        noise = torch.randn_like(x)
         known_latent = known_depth  # Convert to latent space
         # edge_mask=1: edges (refine with x), edge_mask=0: non-edges (preserve known_latent)
-        return x * edge_mask + known_latent * (1 - edge_mask)
+        return x * edge_mask + (known_latent * (1 - Flow_t) + noise * Flow_t) * (1 - edge_mask)
 
     def model_to_internal(self, x, abt):
         """
