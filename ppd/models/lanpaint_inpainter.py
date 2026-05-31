@@ -116,39 +116,34 @@ class LanPaintInpainter:
             num_steps = len(self.sampler.timesteps)
 
         # 1. Initialize random noise
-        # Use the same approach as PixelPerfectDepth.forward_test for consistency
-        # Generate on CPU first, then move to device (this ensures same RNG as PPD)
         x_t = torch.randn(size=[known_depth.shape[0], 1, known_depth.shape[2], known_depth.shape[3]]).to(self.device)
 
-        # 2. Compute semantics once
+        # 2. Store fixed noise for replace step (matching original LanPaint behavior)
+        self._replace_noise = torch.randn_like(x_t)
+
+        # 3. Compute semantics once
         semantics = self.sem_encoder.forward_semantics(rgb_condition)
 
-        # 3. Outer loop: diffusion timesteps
+        # 4. Outer loop: diffusion timesteps
         for step_idx in range(num_steps):
             t = self.sampler.timesteps[step_idx]
 
-            # 4. Compute time parameters for RF/lerp schedule
+            # 5. Compute time parameters for RF/lerp schedule
             VE_Sigma, abt, Flow_t = self.compute_time_parameters(t)
 
-            # 5. Replace step: ensure known regions are properly conditioned
+            # 6. Replace step: ensure known regions are properly conditioned
             x_t = self.replace_step(x_t, known_depth, Flow_t, edge_mask)
 
-            # 6. Convert to internal format for FLD
-            # IMPORTANT: Only convert when FLD is enabled (n_steps > 0)
-            # When n_steps=0, we must match PPD's forward_test exactly
+            # 7. Convert to internal format for FLD
             if self.n_steps > 0:
                 x_t = self.model_to_internal(x_t, abt)
 
-            # 6.5. Compute adaptive step size (matching lanpaint.py:42-43)
-            # Adaptive step_size = base_step_size * (1 - abt)
-            # When abt -> 1 (clean image, small t): step_size -> 0 (small steps for stability)
-            # When abt -> 0 (pure noise, large t): step_size -> base_step_size (larger steps)
+            # 8. Compute adaptive step size
             step_size_adaptive = self.step_size * (1 - abt)
 
-            # 7. Inner loop: FLD iterations
-            args = None  # LangevinState(v, C, x0)
+            # 9. Inner loop: FLD iterations
+            args = None
             for i in range(self.n_steps):
-                # 7a. Prepare score function
                 score_func = partial(self.compute_score,
                                     rgb_condition=rgb_condition,
                                     known_depth=known_depth,
@@ -156,11 +151,6 @@ class LanPaintInpainter:
                                     semantics=semantics,
                                     timestep=t)
 
-                # 7b. Save previous state for Strang splitting
-                x_t_prev = x_t.detach()
-
-                # 7c. Langevin dynamics update
-                # Matching lanpaint.py:75
                 x_t, args = self.langevin_dynamics(
                     x_t, score_func, edge_mask,
                     step_size=self.add_none_dims(step_size_adaptive),
@@ -170,18 +160,17 @@ class LanPaintInpainter:
                     args=args
                 )
 
-            # 8. Convert back to model format
-            # IMPORTANT: Only convert when FLD is enabled (n_steps > 0)
+            # 10. Convert back to model format
             if self.n_steps > 0:
                 x_t = self.internal_to_model(x_t, abt)
 
-            # 9. Standard denoise step (Euler sampler)
+            # 11. Standard denoise step (Euler sampler)
             dit_input = torch.cat([x_t, rgb_condition - 0.5], dim=1)
             pred = self.dit_model(x=dit_input, semantics=semantics, timestep=t)
             x_t = self.sampler.step(pred=pred, x_t=x_t, t=t)
 
-        # 9. Final output (add 0.5 to convert from latent space)
-        # return torch.clamp(x_t, 0.0, 1.0)
+        # 12. Final replacement: restore known pixels exactly (matching original line 120)
+        x_t = x_t * edge_mask + known_depth * (1 - edge_mask)
         return x_t
 
     def compute_time_parameters(self, timestep):
@@ -222,9 +211,8 @@ class LanPaintInpainter:
         Returns:
             Updated latent state with known regions replaced
         """
-        noise = torch.randn_like(x)
-        known_latent = known_depth  # Convert to latent space
-        # edge_mask=1: edges (refine with x), edge_mask=0: non-edges (preserve known_latent)
+        noise = self._replace_noise
+        known_latent = known_depth
         return x * edge_mask + (known_latent * (1 - Flow_t) + noise * Flow_t) * (1 - edge_mask)
 
     def model_to_internal(self, x, abt):
@@ -263,39 +251,32 @@ class LanPaintInpainter:
         """
         Compute score function using BiG Score.
 
-        BiG Score provides bidirectional guidance:
-        - Unknown regions: standard score toward predicted x_0
-        - Known regions: (1+λ)*(y - x_t) + λ*score_to_big
-
-        Args:
-            x_t: Current latent state (internal format)
-            rgb_condition: RGB conditioning
-            known_depth: Known depth from MoGe-2
-            edge_mask: Edge mask
-            semantics: Semantic features
-            timestep: Current timestep
-
-        Returns:
-            Score function, shape (B, 1, H, W)
+        x_t is in internal format. We convert to model format for the DiT call,
+        matching original LanPaint score_model (lanpaint.py:127-141).
         """
-        # Model prediction
-        dit_input = torch.cat([x_t, rgb_condition - 0.5], dim=1)
+        # Convert internal → model format for DiT call
+        s = timestep / self.schedule.T
+        abt_local = (1 - s) ** 2 / ((1 - s) ** 2 + s ** 2 + 1e-8)
+        factor = torch.sqrt(abt_local) + torch.sqrt(1 - abt_local + 1e-8)
+        x_model = x_t / factor
+
+        # Model prediction in model format
+        dit_input = torch.cat([x_model, rgb_condition - 0.5], dim=1)
         pred = self.dit_model(x=dit_input, semantics=semantics, timestep=timestep)
 
-        # Convert velocity to x_0
-        pred_x0, _ = self.schedule.convert_from_pred(pred, 'velocity', x_t, timestep)
+        # Convert velocity → x_0 (in model format)
+        pred_x0, _ = self.schedule.convert_from_pred(pred, 'velocity', x_model, timestep)
 
-        # Simplified BiG Score (single inference version)
-        y = known_depth  # Convert to latent space
+        # BiG Score (matching original lanpaint.py:139-141)
+        y = known_depth
 
-        # Standard score for unknown regions
+        # score_x = -(x_t - x_0)  (in internal format for x_t, model format for x_0)
         score_unknown = -(x_t - pred_x0)
 
-        # BiG Score for known regions: (1+λ)*(y - x_t) + λ*score_unknown
+        # score_y = -(1+λ)*(x_t - y) + λ*(x_t - x_0_BIG)
         score_known = (1 + self.lambda_big) * (y - x_t) - self.lambda_big * score_unknown
 
-        # Mix based on edge mask
-        # edge_mask=1: edges (use score_unknown), edge_mask=0: non-edges (use score_known)
+        # Mix: edge_mask=1 → unknown, edge_mask=0 → known
         score = score_unknown * edge_mask + score_known * (1 - edge_mask)
         return score
 
