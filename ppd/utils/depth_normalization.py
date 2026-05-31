@@ -75,7 +75,7 @@ def normalize_depth_for_ppd(
 
     # Normalize to [0, 1] then shift to [-0.5, 0.5]
     depth_normalized = (depth_log - min_val) / (max_val - min_val)
-    depth_normalized = torch.clamp(depth_normalized, -0.5, 1.0)
+    # depth_normalized = torch.clamp(depth_normalized, -0.5, 1.0)
     depth_normalized = depth_normalized - 0.5
 
     return depth_normalized, (min_val, max_val)

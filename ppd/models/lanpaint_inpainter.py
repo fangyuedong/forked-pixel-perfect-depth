@@ -181,7 +181,8 @@ class LanPaintInpainter:
             x_t = self.sampler.step(pred=pred, x_t=x_t, t=t)
 
         # 9. Final output (add 0.5 to convert from latent space)
-        return torch.clamp(x_t + 0.5, 0.0, 1.0)
+        # return torch.clamp(x_t, 0.0, 1.0)
+        return x_t
 
     def compute_time_parameters(self, timestep):
         """
