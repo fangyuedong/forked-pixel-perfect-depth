@@ -20,6 +20,16 @@ def read_depth_png(path: str) -> np.ndarray:
     return depth_raw.astype(np.float64) / 256.0
 
 
+def write_depth_png(depth: np.ndarray, path: str):
+    """Write a depth map as KITTI 16-bit PNG.
+
+    KITTI convention: depth_meters = pixel_value / 256.0
+    Values <= 0 are saved as 0 (invalid).
+    """
+    encoded = np.clip(np.round(depth * 256), 0, 65535).astype(np.uint16)
+    cv2.imwrite(path, encoded)
+
+
 def dilate_depth(depth: np.ndarray, kernel_size: int = 3) -> np.ndarray:
     """Dilate sparse depth map so each valid point becomes a larger patch.
 
