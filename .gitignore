@@ -1,3 +1,7 @@
 RePaint/*
 *.pyc
 checkpoints/*
+kitti_inpaint*/*
+*_step*.py
+*_step*/*
+step*/*

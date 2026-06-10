@@ -30,6 +30,32 @@ def write_depth_png(depth: np.ndarray, path: str):
     cv2.imwrite(path, encoded)
 
 
+def inflate_depth(depth: np.ndarray, kernel_size: int = 15) -> np.ndarray:
+    """Simulate depth inflation: expand each valid pixel outward, with foreground
+    (closer / smaller depth) taking priority over background when expansions overlap.
+
+    For every output pixel, the value is the *minimum* valid depth among all valid
+    pixels inside a (kernel_size x kernel_size) elliptical neighbourhood.
+    The coverage is equivalent to morphological dilation of the validity mask.
+    """
+    valid = depth > 0
+    if kernel_size <= 1 or not np.any(valid):
+        return depth.copy()
+
+    LARGE = float(1e6)
+    filled = np.where(valid, depth, LARGE).astype(np.float32)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+
+    # erode → minimum in neighbourhood → foreground depth wins
+    eroded = cv2.erode(filled, kernel, borderType=cv2.BORDER_CONSTANT, borderValue=LARGE)
+
+    # dilate mask → expanded coverage
+    dilated_valid = cv2.dilate(valid.astype(np.uint8), kernel, borderType=cv2.BORDER_CONSTANT, borderValue=0)
+
+    return np.where((dilated_valid > 0) & (eroded < LARGE), eroded.astype(depth.dtype), 0.0)
+
+
 def dilate_depth(depth: np.ndarray, kernel_size: int = 3) -> np.ndarray:
     """Dilate sparse depth map so each valid point becomes a larger patch.
 

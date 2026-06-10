@@ -41,7 +41,8 @@ class DepthInpaintPipeline:
     """Sparse metric depth → dense metric depth via PPD + LanPaint."""
 
     def __init__(self, device, semantics_model='DA2', sampling_steps=10,
-                 fld_steps=5, fld_step_size=0.2, fld_lambda=16.0, fld_friction=15.0):
+                 fld_steps=5, fld_step_size=0.2, fld_lambda=16.0, fld_friction=15.0,
+                 debug_dir=None):
         self.device = device
 
         if semantics_model == 'MoGe2':
@@ -70,6 +71,7 @@ class DepthInpaintPipeline:
             lambda_big=fld_lambda, friction=fld_friction,
         )
         self.sampling_steps = sampling_steps
+        self.debug_dir = debug_dir
 
     def __call__(self, image_bgr, sparse_depth, intrinsic=None):
         """Inpaint sparse metric depth using RGB image.
@@ -107,9 +109,20 @@ class DepthInpaintPipeline:
         gt_in_ppd = np.where(valid, (gt_log - b) / a - 0.5, 0.0)
 
         # Step 4: Inpaint
-        known_depth = torch.from_numpy(gt_in_ppd).unsqueeze(0).unsqueeze(0).float().to(self.device)
-        inpaint_mask = 1.0 - torch.from_numpy(valid.astype(np.float32)).unsqueeze(0).unsqueeze(0).float().to(self.device)
+        known_depth = torch.from_numpy(gt_in_ppd.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(self.device)
+        inpaint_mask = 1.0 - torch.from_numpy(valid.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(self.device)
         rgb_condition = torch.from_numpy(rgb_resize / 255.0).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
+
+        # Debug: save RGB + known_depth overlay at PPD resolution
+        if self.debug_dir:
+            import os
+            from kitti_utils import visualize_depth_overlay
+            os.makedirs(self.debug_dir, exist_ok=True)
+            known_mask = (1.0 - inpaint_mask.squeeze().cpu().numpy()).astype(bool)
+            known_metric = np.where(known_mask, depth_resized, 0.0)
+            overlay = visualize_depth_overlay(rgb_resize, known_metric, alpha=0.6, point_size=1)
+            cv2.imwrite(os.path.join(self.debug_dir, "known_depth_overlay.png"),
+                        cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
 
         autocast_dtype = torch.bfloat16 if has_native_bf16() else torch.float16
         with torch.autocast(device_type=self.device.type, dtype=autocast_dtype):

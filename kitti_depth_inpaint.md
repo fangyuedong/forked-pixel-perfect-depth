@@ -191,3 +191,28 @@ Langevin动力学的摩擦系数Γ。控制SHO中的阻尼程度（lanpaint.py:2
 | 更快推理 | 减小N (5→0或3)，减小sampling_steps |
 | 数值不稳定 | 减小η (0.2→0.1)，增大Γ (15→20) |
 | 已知区域过度锐化 | 减小λ (16→8) |
+
+## Step 7
+
+### 背景
+* 我仔细阅读了你Step 5做的改动，发现**Bug 3: replace_step每次生成新噪声**，有些疑问
+* 我阅读了lanpaint.py,发现LanPaint调用一次__call__应该是调用了一次模型原本的去噪步+一轮lanpaint迭代
+* 所以lanpaint.py:44-45生成的噪声只作用给了out_loop的一轮迭代
+
+### 测试
+* 为了验证上面的观点，我们需要进行对比测试
+* 从kitti depth数据中随机采样10个样本，跑一下test_step6.py，结果放到step6/no_replace_noise
+* 修改下replace_noise逻辑，改成每轮out_loop都随机生成noise. 使用上述相同样本跑下test_step6.py，结果放到step6/replace_noise
+* 10个样本从kitti depth目录下随机挑，不要只挑一个序列的
+
+### 实现要求
+* 这次我们只最小化修改已有python脚本，实现上述测试，不增加新的python脚本
+
+
+## Step 8
+
+### 目前情况
+* 看上去两个版本没有明显差别
+
+### 实现要求
+* 相关py文件全部改成replace_noise方式，删除no_replace_noise选项

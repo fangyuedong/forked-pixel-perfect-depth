@@ -118,14 +118,13 @@ class LanPaintInpainter:
         # 1. Initialize random noise
         x_t = torch.randn(size=[known_depth.shape[0], 1, known_depth.shape[2], known_depth.shape[3]]).to(self.device)
 
-        # 2. Store fixed noise for replace step (matching original LanPaint behavior)
-        self._replace_noise = torch.randn_like(x_t)
-
-        # 3. Compute semantics once
+        # 2. Compute semantics once
         semantics = self.sem_encoder.forward_semantics(rgb_condition)
 
-        # 4. Outer loop: diffusion timesteps
+        # 3. Outer loop: diffusion timesteps
         for step_idx in range(num_steps):
+            self._replace_noise = torch.randn_like(x_t)
+
             t = self.sampler.timesteps[step_idx]
 
             # 5. Compute time parameters for RF/lerp schedule
