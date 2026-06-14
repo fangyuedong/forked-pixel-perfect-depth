@@ -5,3 +5,4 @@ kitti_inpaint*/*
 *_step*.py
 *_step*/*
 step*/*
+eval_*/*

@@ -42,7 +42,7 @@ class DepthInpaintPipeline:
 
     def __init__(self, device, semantics_model='DA2', sampling_steps=10,
                  fld_steps=5, fld_step_size=0.2, fld_lambda=16.0, fld_friction=15.0,
-                 debug_dir=None):
+                 early_stop=0, debug_dir=None):
         self.device = device
 
         if semantics_model == 'MoGe2':
@@ -68,7 +68,7 @@ class DepthInpaintPipeline:
             schedule=schedule, sampler=sampler,
             dit_model=self.model.dit, sem_encoder=self.model.sem_encoder,
             device=device, n_steps=fld_steps, step_size=fld_step_size,
-            lambda_big=fld_lambda, friction=fld_friction,
+            lambda_big=fld_lambda, friction=fld_friction, early_stop=early_stop,
         )
         self.sampling_steps = sampling_steps
         self.debug_dir = debug_dir

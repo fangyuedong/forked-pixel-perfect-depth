@@ -48,7 +48,7 @@ class LanPaintInpainter:
 
     def __init__(self, schedule, sampler, dit_model, sem_encoder, device,
                  n_steps=5, step_size=0.2, lambda_big=16.0, friction=15.0, beta=1.0,
-                 use_simplified_big=True):
+                 use_simplified_big=True, early_stop=0):
         self.schedule = schedule
         self.sampler = sampler
         self.dit_model = dit_model
@@ -60,6 +60,7 @@ class LanPaintInpainter:
         self.friction = friction
         self.beta = beta
         self.use_simplified_big = use_simplified_big
+        self.early_stop = early_stop
 
         # For [B, C, H, W] tensors
         self.img_dim_size = 4
@@ -127,6 +128,14 @@ class LanPaintInpainter:
 
             t = self.sampler.timesteps[step_idx]
 
+            # Outer early stop: skip FLD in the last `early_stop` steps,
+            # matching original LanPaint (nodes.py:180). Prevents FLD random
+            # perturbations from persisting into the final output.
+            if num_steps - step_idx <= self.early_stop:
+                n_steps_this = 0
+            else:
+                n_steps_this = self.n_steps
+
             # 5. Compute time parameters for RF/lerp schedule
             VE_Sigma, abt, Flow_t = self.compute_time_parameters(t)
 
@@ -134,7 +143,7 @@ class LanPaintInpainter:
             x_t = self.replace_step(x_t, known_depth, Flow_t, edge_mask)
 
             # 7. Convert to internal format for FLD
-            if self.n_steps > 0:
+            if n_steps_this > 0:
                 x_t = self.model_to_internal(x_t, abt)
 
             # 8. Compute adaptive step size
@@ -142,7 +151,7 @@ class LanPaintInpainter:
 
             # 9. Inner loop: FLD iterations
             args = None
-            for i in range(self.n_steps):
+            for i in range(n_steps_this):
                 score_func = partial(self.compute_score,
                                     rgb_condition=rgb_condition,
                                     known_depth=known_depth,
@@ -160,7 +169,7 @@ class LanPaintInpainter:
                 )
 
             # 10. Convert back to model format
-            if self.n_steps > 0:
+            if n_steps_this > 0:
                 x_t = self.internal_to_model(x_t, abt)
 
             # 11. Standard denoise step (Euler sampler)
@@ -169,7 +178,7 @@ class LanPaintInpainter:
             x_t = self.sampler.step(pred=pred, x_t=x_t, t=t)
 
         # 12. Final replacement: restore known pixels exactly (matching original line 120)
-        x_t = x_t * edge_mask + known_depth * (1 - edge_mask)
+        # x_t = x_t * edge_mask + known_depth * (1 - edge_mask)
         return x_t
 
     def compute_time_parameters(self, timestep):
